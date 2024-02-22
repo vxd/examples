@@ -1,0 +1,839 @@
+From dd0564aeb38b6925902c1585634d0461a0f2f07b Mon Sep 17 00:00:00 2001
+From: Sergei Khmylev <sergei.khmylev@insystemplus.ru>
+Date: Mon, 6 Mar 2023 12:25:15 +0000
+Subject: [PATCH] [MATCH-1646] added position functionality for managers
+
+---
+ .../v1/manager_positions_controller.rb        | 45 +++++++++++++++++
+ .../manager_api/v1/managers_controller.rb     |  2 +-
+ app/models/dinamo/manager.rb                  | 21 +++++---
+ app/models/dinamo/manager_position.rb         | 20 ++++++++
+ app/models/dinamo/player.rb                   |  7 +--
+ app/mutators/manager_position_mutator.rb      |  9 ++++
+ .../v1/manager_position_serializer.rb         | 17 +++++++
+ .../manager_api/v1/manager_serializer.rb      |  1 +
+ app/validators/manager_contracts.rb           |  1 +
+ app/validators/manager_position_contracts.rb  | 14 ++++++
+ config/routes.rb                              |  1 +
+ ...20230216143337_create_manager_positions.rb | 14 ++++++
+ db/dinamo_schema.rb                           | 11 +++-
+ db/schema.rb                                  |  2 +-
+ db/seeds/dinamo/manager_positions.seeds.rb    | 11 ++++
+ spec/factories/dinamo/manager_positions.rb    | 38 ++++++++++++++
+ spec/factories/dinamo/managers.rb             | 21 +++++---
+ spec/factories/dinamo/players.rb              |  7 +--
+ spec/models/dinamo/manager_position_spec.rb   | 15 ++++++
+ spec/models/dinamo/manager_spec.rb            | 21 +++++---
+ spec/models/dinamo/player_spec.rb             |  7 +--
+ .../dinamo/manager_positions/delete_spec.rb   | 20 ++++++++
+ .../v1/dinamo/manager_positions/index_spec.rb | 26 ++++++++++
+ .../v1/dinamo/manager_positions/patch_spec.rb | 50 +++++++++++++++++++
+ .../v1/dinamo/manager_positions/post_spec.rb  | 47 +++++++++++++++++
+ .../v1/dinamo/manager_positions/show_spec.rb  | 30 +++++++++++
+ .../v1/dinamo/managers/patch_spec.rb          |  8 +++
+ .../v1/dinamo/managers/post_spec.rb           | 10 ++++
+ 28 files changed, 434 insertions(+), 42 deletions(-)
+ create mode 100644 app/controllers/manager_api/v1/manager_positions_controller.rb
+ create mode 100644 app/models/dinamo/manager_position.rb
+ create mode 100644 app/mutators/manager_position_mutator.rb
+ create mode 100644 app/serializers/manager_api/v1/manager_position_serializer.rb
+ create mode 100644 app/validators/manager_position_contracts.rb
+ create mode 100644 db/dinamo_migrate/20230216143337_create_manager_positions.rb
+ create mode 100644 db/seeds/dinamo/manager_positions.seeds.rb
+ create mode 100644 spec/factories/dinamo/manager_positions.rb
+ create mode 100644 spec/models/dinamo/manager_position_spec.rb
+ create mode 100644 spec/requests/manager_api/v1/dinamo/manager_positions/delete_spec.rb
+ create mode 100644 spec/requests/manager_api/v1/dinamo/manager_positions/index_spec.rb
+ create mode 100644 spec/requests/manager_api/v1/dinamo/manager_positions/patch_spec.rb
+ create mode 100644 spec/requests/manager_api/v1/dinamo/manager_positions/post_spec.rb
+ create mode 100644 spec/requests/manager_api/v1/dinamo/manager_positions/show_spec.rb
+
+diff --git a/app/controllers/manager_api/v1/manager_positions_controller.rb b/app/controllers/manager_api/v1/manager_positions_controller.rb
+new file mode 100644
+index 00000000..7f7b59c8
+--- /dev/null
++++ b/app/controllers/manager_api/v1/manager_positions_controller.rb
+@@ -0,0 +1,45 @@
++# frozen_string_literal: true
++
++module ManagerApi
++  module V1
++    class ManagerPositionsController < BaseController
++      before_action :authorize!
++      before_action :validate, only: %i[create update]
++
++      def index
++        items = Tenant::BuildClass.call(tenant, 'ManagerPosition').all
++        render json: ManagerApi::V1::ManagerPositionSerializer.new(items), status: :ok
++      end
++
++      def show
++        item = Tenant::BuildClass.call(tenant, 'ManagerPosition').find(params[:id])
++        render json: ManagerApi::V1::ManagerPositionSerializer.new(item), status: :ok
++      end
++
++      def create
++        item = ::ManagerPositionMutator.create!(tenant, manager_position_params)
++        render json: ManagerApi::V1::ManagerPositionSerializer.new(item), status: :created
++      end
++
++      def update
++        item = ::ManagerPositionMutator.update!(tenant, params[:id], manager_position_params)
++        render json: ManagerApi::V1::ManagerPositionSerializer.new(item), status: :created
++      end
++
++      def destroy
++        ::ManagerPositionMutator.delete!(tenant, params[:id])
++        render json: {}, status: :no_content
++      end
++
++      private
++
++      def validate
++        ::ManagerPositionContracts.call(manager_position_params)
++      end
++
++      def manager_position_params
++        params.require(:manager_position).permit(translations: {})
++      end
++    end
++  end
++end
+diff --git a/app/controllers/manager_api/v1/managers_controller.rb b/app/controllers/manager_api/v1/managers_controller.rb
+index 3d1bab27..31568d22 100644
+--- a/app/controllers/manager_api/v1/managers_controller.rb
++++ b/app/controllers/manager_api/v1/managers_controller.rb
+@@ -38,7 +38,7 @@ module ManagerApi
+       end
+ 
+       def manager_params
+-        params.require(:manager).permit(:team_id, :external_id, translations: {})
++        params.require(:manager).permit(:manager_position_id, :team_id, :external_id, translations: {})
+       end
+     end
+   end
+diff --git a/app/models/dinamo/manager.rb b/app/models/dinamo/manager.rb
+index beea313b..faf58a63 100644
+--- a/app/models/dinamo/manager.rb
++++ b/app/models/dinamo/manager.rb
+@@ -4,20 +4,27 @@
+ #
+ # Table name: managers
+ #
+-#  id           :bigint           not null, primary key
+-#  translations :jsonb            not null
+-#  created_at   :datetime         not null
+-#  updated_at   :datetime         not null
+-#  external_id  :string(256)
+-#  team_id      :bigint
++#  id                  :bigint           not null, primary key
++#  translations        :jsonb            not null
++#  created_at          :datetime         not null
++#  updated_at          :datetime         not null
++#  external_id         :string(256)
++#  manager_position_id :bigint
++#  team_id             :bigint
+ #
+ # Indexes
+ #
+-#  index_managers_on_team_id  (team_id)
++#  index_managers_on_manager_position_id  (manager_position_id)
++#  index_managers_on_team_id              (team_id)
++#
++# Foreign Keys
++#
++#  fk_rails_...  (manager_position_id => manager_positions.id)
+ #
+ module Dinamo
+   class Manager < ::DinamoRecord
+     belongs_to :team
++    belongs_to :manager_position
+     translates :first_name, :last_name
+ 
+     with_options presence: true do
+diff --git a/app/models/dinamo/manager_position.rb b/app/models/dinamo/manager_position.rb
+new file mode 100644
+index 00000000..93bf731d
+--- /dev/null
++++ b/app/models/dinamo/manager_position.rb
+@@ -0,0 +1,20 @@
++# frozen_string_literal: true
++
++# == Schema Information
++#
++# Table name: manager_positions
++#
++#  id           :bigint           not null, primary key
++#  translations :jsonb            not null
++#  created_at   :datetime         not null
++#  updated_at   :datetime         not null
++#
++module Dinamo
++  class ManagerPosition < ::DinamoRecord
++    has_many :manager, inverse_of: :manager_position, dependent: :restrict_with_error, class_name: 'Dinamo::Manager'
++    translates :job_title
++    with_options presence: true do
++      validates :job_title
++    end
++  end
++end
+diff --git a/app/models/dinamo/player.rb b/app/models/dinamo/player.rb
+index 78fa2a10..44308530 100644
+--- a/app/models/dinamo/player.rb
++++ b/app/models/dinamo/player.rb
+@@ -4,16 +4,11 @@
+ #
+ # Table name: players
+ #
+-#  id           :bigint           not null, primary key
+-#  translations :jsonb            not null
+-#  created_at   :datetime         not null
+-#  updated_at   :datetime         not null
+-#  external_id  :string(256)
+-#  team_id      :bigint
+ #  id                 :bigint           not null, primary key
+ #  translations       :jsonb            not null
+ #  created_at         :datetime         not null
+ #  updated_at         :datetime         not null
++#  external_id        :string(256)
+ #  player_position_id :bigint
+ #  team_id            :bigint
+ #
+diff --git a/app/mutators/manager_position_mutator.rb b/app/mutators/manager_position_mutator.rb
+new file mode 100644
+index 00000000..08da91d3
+--- /dev/null
++++ b/app/mutators/manager_position_mutator.rb
+@@ -0,0 +1,9 @@
++# frozen_string_literal: true
++
++class ManagerPositionMutator < BaseMutator
++  protected
++
++  def base_class
++    tenant_class('ManagerPosition')
++  end
++end
+diff --git a/app/serializers/manager_api/v1/manager_position_serializer.rb b/app/serializers/manager_api/v1/manager_position_serializer.rb
+new file mode 100644
+index 00000000..aea27c37
+--- /dev/null
++++ b/app/serializers/manager_api/v1/manager_position_serializer.rb
+@@ -0,0 +1,17 @@
++# frozen_string_literal: true
++
++module ManagerApi
++  module V1
++    class ManagerPositionSerializer
++      include JSONAPI::Serializer
++
++      attributes :id
++
++      attribute :translations do |object|
++        serializer = TranslationSerializer.new(object, fields: %w[job_title])
++        serializer.serializable_hash
++      end
++      has_many :managers, serializer: ManagerSerializer, &:manager
++    end
++  end
++end
+diff --git a/app/serializers/manager_api/v1/manager_serializer.rb b/app/serializers/manager_api/v1/manager_serializer.rb
+index 8f4e94e8..3fb5a7cf 100644
+--- a/app/serializers/manager_api/v1/manager_serializer.rb
++++ b/app/serializers/manager_api/v1/manager_serializer.rb
+@@ -13,6 +13,7 @@ module ManagerApi
+       end
+ 
+       belongs_to :team, serializer: TeamSerializer, &:team
++      belongs_to :manager_position, serializer: ManagerPositionSerializer, &:manager_position
+     end
+   end
+ end
+diff --git a/app/validators/manager_contracts.rb b/app/validators/manager_contracts.rb
+index 73fceca7..c412959e 100644
+--- a/app/validators/manager_contracts.rb
++++ b/app/validators/manager_contracts.rb
+@@ -4,6 +4,7 @@ class ManagerContracts < ApplicationContract
+   params do
+     required(:translations).value(type?: Hash)
+     required(:team_id).filled(:integer)
++    required(:manager_position_id).filled(:integer)
+     optional(:external_id).maybe(:str?, size?: EXTERNAL_ID_SIZE)
+   end
+ 
+diff --git a/app/validators/manager_position_contracts.rb b/app/validators/manager_position_contracts.rb
+new file mode 100644
+index 00000000..903e695c
+--- /dev/null
++++ b/app/validators/manager_position_contracts.rb
+@@ -0,0 +1,14 @@
++# frozen_string_literal: true
++
++class ManagerPositionContracts < ApplicationContract
++  params do
++    required(:translations).value(type?: Hash)
++  end
++
++  rule(:translations) do
++    value.each do |_, value|
++      key.failure(:invalid_text_size) if TITLE_SIZE.exclude?(value[:job_title].size)
++      key.failure(:invalid_text_format) unless STRING_PATTERN.match?(value[:job_title])
++    end
++  end
++end
+diff --git a/config/routes.rb b/config/routes.rb
+index ae5971a4..c1b0a47e 100644
+--- a/config/routes.rb
++++ b/config/routes.rb
+@@ -36,6 +36,7 @@ Rails.application.routes.draw do
+       resources :players
+       resources :player_positions
+       resources :managers
++      resources :manager_positions
+       resources :video_posts
+       resources :video_categories
+       resources :store_items
+diff --git a/db/dinamo_migrate/20230216143337_create_manager_positions.rb b/db/dinamo_migrate/20230216143337_create_manager_positions.rb
+new file mode 100644
+index 00000000..5cc53d49
+--- /dev/null
++++ b/db/dinamo_migrate/20230216143337_create_manager_positions.rb
+@@ -0,0 +1,14 @@
++class CreateManagerPositions < ActiveRecord::Migration[6.1]
++  def up
++    create_table :manager_positions do |t|
++      t.jsonb :translations, null: false, default: {}
++      t.timestamps
++    end
++    add_belongs_to :managers, :manager_position, foreign_key: true, index: true
++  end
++
++  def down
++    drop_table :manager_positions
++    remove_reference :managers, :manager_position
++  end
++end
+diff --git a/db/dinamo_schema.rb b/db/dinamo_schema.rb
+index 3e217ef7..5f44832f 100644
+--- a/db/dinamo_schema.rb
++++ b/db/dinamo_schema.rb
+@@ -10,7 +10,7 @@
+ #
+ # It's strongly recommended that you check this file into your version control system.
+ 
+-ActiveRecord::Schema.define(version: 2023_02_16_143336) do
++ActiveRecord::Schema.define(version: 2023_02_16_143337) do
+ 
+   # These are extensions that must be enabled in order to support this database
+   enable_extension "plpgsql"
+@@ -72,12 +72,20 @@ ActiveRecord::Schema.define(version: 2023_02_16_143336) do
+     t.datetime "updated_at", precision: 6, null: false
+   end
+ 
++  create_table "manager_positions", force: :cascade do |t|
++    t.jsonb "translations", default: {}, null: false
++    t.datetime "created_at", precision: 6, null: false
++    t.datetime "updated_at", precision: 6, null: false
++  end
++
+   create_table "managers", force: :cascade do |t|
+     t.bigint "team_id"
+     t.datetime "created_at", precision: 6, null: false
+     t.datetime "updated_at", precision: 6, null: false
+     t.jsonb "translations", default: {}, null: false
+     t.string "external_id", limit: 256
++    t.bigint "manager_position_id"
++    t.index ["manager_position_id"], name: "index_managers_on_manager_position_id"
+     t.index ["team_id"], name: "index_managers_on_team_id"
+   end
+ 
+@@ -260,5 +268,6 @@ ActiveRecord::Schema.define(version: 2023_02_16_143336) do
+     t.index ["tournaments"], name: "index_video_posts_on_tournaments", using: :gin
+   end
+ 
++  add_foreign_key "managers", "manager_positions"
+   add_foreign_key "players", "player_positions"
+ end
+diff --git a/db/schema.rb b/db/schema.rb
+index 0c1429ab..70b57ea5 100644
+--- a/db/schema.rb
++++ b/db/schema.rb
+@@ -10,7 +10,7 @@
+ #
+ # It's strongly recommended that you check this file into your version control system.
+ 
+-ActiveRecord::Schema.define(version: 2022_07_26_190400) do
++ActiveRecord::Schema.define(version: 2023_03_03_080258) do
+ 
+   # These are extensions that must be enabled in order to support this database
+   enable_extension "plpgsql"
+diff --git a/db/seeds/dinamo/manager_positions.seeds.rb b/db/seeds/dinamo/manager_positions.seeds.rb
+new file mode 100644
+index 00000000..c7cb9f7f
+--- /dev/null
++++ b/db/seeds/dinamo/manager_positions.seeds.rb
+@@ -0,0 +1,11 @@
++require 'ffaker'
++
++5.times do
++  item = ::Dinamo::ManagerPosition.new
++  Tenant::DefaultSettings.available_locales.each do |locale|
++    Mobility.with_locale(locale) do
++      item.job_title = FFaker::Job.title
++    end
++  end
++  item.save!
++end
+diff --git a/spec/factories/dinamo/manager_positions.rb b/spec/factories/dinamo/manager_positions.rb
+new file mode 100644
+index 00000000..93c958c3
+--- /dev/null
++++ b/spec/factories/dinamo/manager_positions.rb
+@@ -0,0 +1,38 @@
++# == Schema Information
++#
++# Table name: manager_positions
++#
++#  id           :bigint           not null, primary key
++#  translations :jsonb            not null
++#  created_at   :datetime         not null
++#  updated_at   :datetime         not null
++#
++FactoryBot.define do
++  factory :dinamo_manager_position, class: '::Dinamo::ManagerPosition', aliases: ['Dinamo::ManagerPosition'] do
++    job_title { "#{FFaker::Job.title}:; ~ !? #_* (/|/)" }
++
++    trait :with_translate do
++      after(:build) do |item|
++        Tenant::DefaultSettings.available_locales.each do |locale|
++          Mobility.with_locale(locale) do
++            item.assign_attributes(attributes_for(:dinamo_manager_position))
++          end
++        end
++      end
++    end
++
++    trait :with_invalid_attributes do
++      after(:build) do |item|
++        Tenant::DefaultSettings.available_locales.each do |locale|
++          Mobility.with_locale(locale) do
++            item.assign_attributes(attributes_for(:dinamo_manager_position, :with_invalid_job_title))
++          end
++        end
++      end
++    end
++
++    trait :with_invalid_job_title do
++      job_title { "#{SecureRandom.hex(257)}^ƒ©∆∫√" }
++    end
++  end
++end
+diff --git a/spec/factories/dinamo/managers.rb b/spec/factories/dinamo/managers.rb
+index 609bb25e..89c24a67 100644
+--- a/spec/factories/dinamo/managers.rb
++++ b/spec/factories/dinamo/managers.rb
+@@ -2,22 +2,29 @@
+ #
+ # Table name: managers
+ #
+-#  id           :bigint           not null, primary key
+-#  translations :jsonb            not null
+-#  created_at   :datetime         not null
+-#  updated_at   :datetime         not null
+-#  external_id  :string(256)
+-#  team_id      :bigint
++#  id                  :bigint           not null, primary key
++#  translations        :jsonb            not null
++#  created_at          :datetime         not null
++#  updated_at          :datetime         not null
++#  external_id         :string(256)
++#  manager_position_id :bigint
++#  team_id             :bigint
+ #
+ # Indexes
+ #
+-#  index_managers_on_team_id  (team_id)
++#  index_managers_on_manager_position_id  (manager_position_id)
++#  index_managers_on_team_id              (team_id)
++#
++# Foreign Keys
++#
++#  fk_rails_...  (manager_position_id => manager_positions.id)
+ #
+ FactoryBot.define do
+   factory :dinamo_manager, class: 'Dinamo::Manager', aliases: ['Dinamo::Manager'] do
+     sequence(:first_name) { 'Dinamo manager first name' }
+     sequence(:last_name) { 'Dinamo manager last name' }
+     association :team, factory: :dinamo_team
++    association :manager_position, factory: :dinamo_manager_position
+     external_id { rand(1..256).to_s }
+   end
+ end
+diff --git a/spec/factories/dinamo/players.rb b/spec/factories/dinamo/players.rb
+index dbe2b08e..77e0dc43 100644
+--- a/spec/factories/dinamo/players.rb
++++ b/spec/factories/dinamo/players.rb
+@@ -2,16 +2,11 @@
+ #
+ # Table name: players
+ #
+-#  id           :bigint           not null, primary key
+-#  translations :jsonb            not null
+-#  created_at   :datetime         not null
+-#  updated_at   :datetime         not null
+-#  external_id  :string(256)
+-#  team_id      :bigint
+ #  id                 :bigint           not null, primary key
+ #  translations       :jsonb            not null
+ #  created_at         :datetime         not null
+ #  updated_at         :datetime         not null
++#  external_id        :string(256)
+ #  player_position_id :bigint
+ #  team_id            :bigint
+ #
+diff --git a/spec/models/dinamo/manager_position_spec.rb b/spec/models/dinamo/manager_position_spec.rb
+new file mode 100644
+index 00000000..6d865763
+--- /dev/null
++++ b/spec/models/dinamo/manager_position_spec.rb
+@@ -0,0 +1,15 @@
++# == Schema Information
++#
++# Table name: manager_positions
++#
++#  id           :bigint           not null, primary key
++#  translations :jsonb            not null
++#  created_at   :datetime         not null
++#  updated_at   :datetime         not null
++#
++require 'spec_helper'
++
++describe ::Dinamo::ManagerPosition, type: :model do
++  it { is_expected.to have_many :manager }
++  it { is_expected.to validate_presence_of :job_title }
++end
+diff --git a/spec/models/dinamo/manager_spec.rb b/spec/models/dinamo/manager_spec.rb
+index d2c2aebe..f02f736a 100644
+--- a/spec/models/dinamo/manager_spec.rb
++++ b/spec/models/dinamo/manager_spec.rb
+@@ -2,21 +2,28 @@
+ #
+ # Table name: managers
+ #
+-#  id           :bigint           not null, primary key
+-#  translations :jsonb            not null
+-#  created_at   :datetime         not null
+-#  updated_at   :datetime         not null
+-#  external_id  :string(256)
+-#  team_id      :bigint
++#  id                  :bigint           not null, primary key
++#  translations        :jsonb            not null
++#  created_at          :datetime         not null
++#  updated_at          :datetime         not null
++#  external_id         :string(256)
++#  manager_position_id :bigint
++#  team_id             :bigint
+ #
+ # Indexes
+ #
+-#  index_managers_on_team_id  (team_id)
++#  index_managers_on_manager_position_id  (manager_position_id)
++#  index_managers_on_team_id              (team_id)
++#
++# Foreign Keys
++#
++#  fk_rails_...  (manager_position_id => manager_positions.id)
+ #
+ require 'spec_helper'
+ 
+ describe ::Dinamo::Manager, type: :model do
+   it { is_expected.to belong_to :team }
++  it { is_expected.to belong_to :manager_position }
+   it { is_expected.to validate_presence_of :first_name }
+   it { is_expected.to validate_presence_of :last_name }
+   it { is_expected.to validate_length_of(:external_id).is_at_most(256).allow_blank }
+diff --git a/spec/models/dinamo/player_spec.rb b/spec/models/dinamo/player_spec.rb
+index 0c2a7f3d..eb125e6d 100644
+--- a/spec/models/dinamo/player_spec.rb
++++ b/spec/models/dinamo/player_spec.rb
+@@ -2,16 +2,11 @@
+ #
+ # Table name: players
+ #
+-#  id           :bigint           not null, primary key
+-#  translations :jsonb            not null
+-#  created_at   :datetime         not null
+-#  updated_at   :datetime         not null
+-#  external_id  :string(256)
+-#  team_id      :bigint
+ #  id                 :bigint           not null, primary key
+ #  translations       :jsonb            not null
+ #  created_at         :datetime         not null
+ #  updated_at         :datetime         not null
++#  external_id        :string(256)
+ #  player_position_id :bigint
+ #  team_id            :bigint
+ #
+diff --git a/spec/requests/manager_api/v1/dinamo/manager_positions/delete_spec.rb b/spec/requests/manager_api/v1/dinamo/manager_positions/delete_spec.rb
+new file mode 100644
+index 00000000..34ac75fa
+--- /dev/null
++++ b/spec/requests/manager_api/v1/dinamo/manager_positions/delete_spec.rb
+@@ -0,0 +1,20 @@
++require 'spec_helper'
++
++describe 'delete dinamo manager positions', type: :request do
++  include_context 'with authorized dinamo headers'
++
++  let!(:dinamo_manager_position) { create(:dinamo_manager_position, :with_translate) }
++
++  describe 'DELETE /:id' do
++    context 'if success DELETE' do
++      before do
++        delete manager_api_v1_manager_position_path(dinamo_manager_position.id), headers: headers
++      end
++
++      it 'shows response ok and valid type' do
++        expect(response).to have_http_status(:no_content)
++        expect(Dinamo::ManagerPosition.where(id: dinamo_manager_position.id)).to be_empty
++      end
++    end
++  end
++end
+diff --git a/spec/requests/manager_api/v1/dinamo/manager_positions/index_spec.rb b/spec/requests/manager_api/v1/dinamo/manager_positions/index_spec.rb
+new file mode 100644
+index 00000000..599a6865
+--- /dev/null
++++ b/spec/requests/manager_api/v1/dinamo/manager_positions/index_spec.rb
+@@ -0,0 +1,26 @@
++require 'spec_helper'
++
++describe 'get index dinamo manager positions', type: :request do
++  include_context 'with authorized dinamo headers'
++
++  let!(:valid_manager_position) { create(:dinamo_manager_position, :with_translate) }
++  let(:json_body) { json_response['data'] }
++  let(:request) { get manager_api_v1_manager_positions_path, headers: headers }
++
++  describe 'GET /' do
++    before { request }
++
++    it 'returns success get' do
++      expect(response).to have_http_status(:ok)
++    end
++
++    it 'returns response body Array' do
++      expect(json_body).to be_an_instance_of(Array)
++    end
++
++    it 'returns correct translations' do
++      translations = valid_manager_position.translations
++      expect(Dinamo::ManagerPosition.find(json_body[0]['id']).translations).to eq(translations)
++    end
++  end
++end
+diff --git a/spec/requests/manager_api/v1/dinamo/manager_positions/patch_spec.rb b/spec/requests/manager_api/v1/dinamo/manager_positions/patch_spec.rb
+new file mode 100644
+index 00000000..9102a548
+--- /dev/null
++++ b/spec/requests/manager_api/v1/dinamo/manager_positions/patch_spec.rb
+@@ -0,0 +1,50 @@
++require 'spec_helper'
++
++describe 'patch dinamo manager positions', type: :request do
++  include_context 'with authorized dinamo headers'
++
++  let(:valid_manager_position) { create(:dinamo_manager_position, :with_translate) }
++  let(:valid_manager_position_attributes) { build(:dinamo_manager_position, :with_translate).attributes }
++  let(:invalid_manager_position_attributes) { build(:dinamo_manager_position, :with_invalid_attributes).attributes }
++  let(:valid_manager_position_params) { { 'manager_position' => valid_manager_position_attributes } }
++  let(:invalid_manager_position_params) { { 'manager_position' => invalid_manager_position_attributes } }
++
++  describe 'POST /:manager_position_id' do
++    context 'if success PATCH' do
++      before do
++        patch manager_api_v1_manager_position_path(valid_manager_position.id),
++              params:  valid_manager_position_params,
++              headers: headers
++      end
++
++      let(:json_body) { json_response['data'] }
++
++      it 'shows response ok and valid type' do
++        expect(response.content_type).to eq('application/json; charset=utf-8')
++        expect(response).to have_http_status(:created)
++      end
++
++      it 'checks success translations change' do
++        translations = valid_manager_position_attributes['translations']
++        expect(Dinamo::ManagerPosition.find(json_body['id']).translations).to eq(translations)
++      end
++    end
++
++    context 'if PATCH with invalid params' do
++      before do
++        patch manager_api_v1_manager_position_path(valid_manager_position.id),
++              params:  invalid_manager_position_params,
++              headers: headers
++      end
++
++      let(:json_data) { json_response['errors'] }
++
++      it 'checks messages if params include invalid job title format and size' do
++        errors_data = json_data.uniq.select { |i| i['attribute'] == 'translations' }
++        errors_data = errors_data.map { |attr| attr['details'] }
++        expect(errors_data).to include('Invalid text format')
++        expect(errors_data).to include('Text size must be in range')
++      end
++    end
++  end
++end
+diff --git a/spec/requests/manager_api/v1/dinamo/manager_positions/post_spec.rb b/spec/requests/manager_api/v1/dinamo/manager_positions/post_spec.rb
+new file mode 100644
+index 00000000..ce629bfa
+--- /dev/null
++++ b/spec/requests/manager_api/v1/dinamo/manager_positions/post_spec.rb
+@@ -0,0 +1,47 @@
++require 'spec_helper'
++
++describe 'post dinamo manager positions', type: :request do
++  include_context 'with authorized dinamo headers'
++  let(:valid_attributes) { build(:dinamo_manager_position, :with_translate).attributes }
++  let(:invalid_attributes) { build(:dinamo_manager_position, :with_invalid_attributes).attributes }
++  let(:valid_params) { { 'manager_position' => valid_attributes } }
++  let(:invalid_params) { { 'manager_position' => invalid_attributes } }
++  let(:request) { post manager_api_v1_manager_positions_path, params: params, headers: headers }
++  let(:json_data) { json_response['data'] }
++  let(:json_errors_data) { json_response['errors'] }
++
++  describe 'POST /:manager_position_id' do
++    context 'if success POST' do
++      let(:params) { valid_params }
++
++      it 'shows response ok and valid type' do
++        request
++        expect(response.content_type).to eq('application/json; charset=utf-8')
++        expect(response).to have_http_status(:created)
++      end
++
++      it 'checks success record change' do
++        expect { request }.to change(Dinamo::ManagerPosition, :count).by(1)
++      end
++
++      it 'checks success translations' do
++        request
++        translations = valid_attributes['translations']
++        expect(Dinamo::ManagerPosition.find(json_data['id']).translations).to eq(translations)
++      end
++    end
++
++    context 'if POST with invalid params' do
++      let(:params) { invalid_params }
++
++      before { request }
++
++      it 'checks messages if params include invalid job title format and size' do
++        errors_data = json_errors_data.uniq.select { |i| i['attribute'] == 'translations' }
++        errors_data = errors_data.map { |attr| attr['details'] }
++        expect(errors_data).to include('Invalid text format')
++        expect(errors_data).to include('Text size must be in range')
++      end
++    end
++  end
++end
+diff --git a/spec/requests/manager_api/v1/dinamo/manager_positions/show_spec.rb b/spec/requests/manager_api/v1/dinamo/manager_positions/show_spec.rb
+new file mode 100644
+index 00000000..79569675
+--- /dev/null
++++ b/spec/requests/manager_api/v1/dinamo/manager_positions/show_spec.rb
+@@ -0,0 +1,30 @@
++require 'spec_helper'
++
++describe 'get show dinamo manager positions', type: :request do
++  include_context 'with authorized dinamo headers'
++
++  let!(:valid_manager_position) { create(:dinamo_manager_position, :with_translate) }
++  let(:json_body) { json_response['data'] }
++  let(:request) { get manager_api_v1_manager_position_path(valid_manager_position.id), headers: headers }
++
++  describe 'GET /:manager_position_id' do
++    before { request }
++
++    it 'returns success get' do
++      expect(response).to have_http_status(:ok)
++    end
++
++    it 'returns response body Hash' do
++      expect(json_body).to be_an_instance_of(Hash)
++    end
++
++    it 'returns correct data' do
++      expect(json_body['id'].to_i).to eq(valid_manager_position.id)
++    end
++
++    it 'returns correct translations' do
++      translations = valid_manager_position.translations
++      expect(Dinamo::ManagerPosition.find(json_body['id']).translations).to eq(translations)
++    end
++  end
++end
+diff --git a/spec/requests/manager_api/v1/dinamo/managers/patch_spec.rb b/spec/requests/manager_api/v1/dinamo/managers/patch_spec.rb
+index f9e6f5a6..40ee45bc 100644
+--- a/spec/requests/manager_api/v1/dinamo/managers/patch_spec.rb
++++ b/spec/requests/manager_api/v1/dinamo/managers/patch_spec.rb
+@@ -7,6 +7,7 @@ describe 'patch dinamo managers', type: :request do
+   let(:valid_params) {
+     p = JSON.parse(file_fixture('manager_api/v1/manager.json').read)
+     p['manager']['team_id'] = dinamo_manager.team_id
++    p['manager']['manager_position_id'] = dinamo_manager.manager_position_id
+     p
+   }
+   let(:request) { patch manager_api_v1_manager_path(dinamo_manager.id), params: params, headers: headers }
+@@ -35,6 +36,13 @@ describe 'patch dinamo managers', type: :request do
+       request
+       expect(updated_manager.external_id).to eq(params['manager']['external_id'])
+     end
++
++    it 'checks manager position' do
++      request
++      json_position_id = json_data.dig('relationships', 'manager_position', 'data', 'id').to_i
++      object = Dinamo::Manager.find(dinamo_manager.id)
++      expect(object.manager_position_id).to eq(json_position_id)
++    end
+   end
+ 
+   context 'when parameters are incorrect' do
+diff --git a/spec/requests/manager_api/v1/dinamo/managers/post_spec.rb b/spec/requests/manager_api/v1/dinamo/managers/post_spec.rb
+index 574913d1..6471e8f3 100644
+--- a/spec/requests/manager_api/v1/dinamo/managers/post_spec.rb
++++ b/spec/requests/manager_api/v1/dinamo/managers/post_spec.rb
+@@ -4,9 +4,12 @@ describe 'post dinamo managers', type: :request do
+   include_context 'with authorized dinamo headers'
+ 
+   let!(:dinamo_team) { create(:dinamo_team) }
++  let!(:dinamo_manager_position) { create(:dinamo_manager_position) }
++
+   let(:valid_params) {
+     p = JSON.parse(file_fixture('manager_api/v1/manager.json').read)
+     p['manager']['team_id'] = dinamo_team.id
++    p['manager']['manager_position_id'] = dinamo_manager_position.id
+     p
+   }
+   let(:created_manager) { Dinamo::Manager.find(json_data['id']) }
+@@ -39,6 +42,13 @@ describe 'post dinamo managers', type: :request do
+       request
+       expect(created_manager.external_id).to eq(params['manager']['external_id'])
+     end
++
++    it 'checks manager position' do
++      request
++      json_position_id = json_data.dig('relationships', 'manager_position', 'data', 'id').to_i
++      object = Dinamo::Manager.find(json_data['id'])
++      expect(object.manager_position_id).to eq(json_position_id)
++    end
+   end
+ 
+   context 'when parameters are incorrect' do
+-- 
+2.39.1.windows.1
+

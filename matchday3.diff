@@ -1,0 +1,509 @@
+From 5241ff43ae911a187037f32401372c0d07cbab4d Mon Sep 17 00:00:00 2001
+From: Sergei Khmylev <sergei.khmylev@insystemplus.ru>
+Date: Sun, 18 Dec 2022 21:19:20 +0000
+Subject: [PATCH] [MATCH-795]  Added categories for videos
+
+---
+ .../v1/video_categories_controller.rb         |  29 ++++
+ app/decorators/video_category_decorator.rb    |   1 +
+ app/models/dinamo/video_category.rb           |   2 +
+ .../v1/video_category/picture_serializer.rb   |  18 +++
+ .../v1/video_category_serializer.rb           |   4 +
+ .../v1/video_category/base_service.rb         |  15 ++
+ .../mobile_api/v1/video_category/find.rb      |  18 +++
+ .../mobile_api/v1/video_category/read.rb      |  32 +++++
+ .../video_category_picture_uploader.rb        |  17 +++
+ app/validators/video_category_contracts.rb    |   8 ++
+ config/routes.rb                              |   1 +
+ ...20221110060212_create_video_categories.rb} |   1 +
+ db/dinamo_schema.rb                           |   1 +
+ db/seeds/dinamo/video_categories.seeds.rb     |   4 +-
+ .../dinamo_staging/video_categories.seeds.rb  |   6 +-
+ spec/factories/dinamo/video_categories.rb     |   6 +
+ spec/models/dinamo/video_category_spec.rb     |   1 +
+ .../v1/dinamo/get_video_categories_spec.rb    | 131 ++++++++++++++++++
+ 18 files changed, 293 insertions(+), 2 deletions(-)
+ create mode 100644 app/controllers/mobile_api/v1/video_categories_controller.rb
+ create mode 100644 app/serializers/mobile_api/v1/video_category/picture_serializer.rb
+ create mode 100644 app/services/mobile_api/v1/video_category/base_service.rb
+ create mode 100644 app/services/mobile_api/v1/video_category/find.rb
+ create mode 100644 app/services/mobile_api/v1/video_category/read.rb
+ create mode 100644 app/uploaders/video_category_picture_uploader.rb
+ create mode 100644 app/validators/video_category_contracts.rb
+ rename db/dinamo_migrate/{20221117153604_create_video_categories.rb => 20221110060212_create_video_categories.rb} (91%)
+ create mode 100644 spec/requests/mobile_api/v1/dinamo/get_video_categories_spec.rb
+
+diff --git a/app/controllers/mobile_api/v1/video_categories_controller.rb b/app/controllers/mobile_api/v1/video_categories_controller.rb
+new file mode 100644
+index 00000000..09b6496f
+--- /dev/null
++++ b/app/controllers/mobile_api/v1/video_categories_controller.rb
+@@ -0,0 +1,29 @@
++# frozen_string_literal: true
++
++module MobileApi
++  module V1
++    class VideoCategoriesController < BaseController
++      around_action :wrap_in_request_locale
++
++      def index
++        @categories = MobileApi::V1::VideoCategory::Read.call(tenant, **news_category_params)
++
++        scope = @categories.map { |category| VideoCategoryDecorator.new(category) }
++        render json: MobileApi::V1::VideoCategorySerializer.new(scope)
++      end
++
++      def show
++        @category = MobileApi::V1::VideoCategory::Find.call(tenant, params[:id])
++
++        scope = NewsCategoryDecorator.new(@category)
++        render json: MobileApi::V1::VideoCategorySerializer.new(scope)
++      end
++
++      private
++
++      def news_category_params
++        params.permit(:sort, page: %i[number size])
++      end
++    end
++  end
++end
+diff --git a/app/decorators/video_category_decorator.rb b/app/decorators/video_category_decorator.rb
+index 21012257..f7bfc35f 100644
+--- a/app/decorators/video_category_decorator.rb
++++ b/app/decorators/video_category_decorator.rb
+@@ -1,4 +1,5 @@
+ # frozen_string_literal: true
+ 
+ class VideoCategoryDecorator < ApplicationDecorator
++  translate :name
+ end
+diff --git a/app/models/dinamo/video_category.rb b/app/models/dinamo/video_category.rb
+index 83191788..eaebf85a 100644
+--- a/app/models/dinamo/video_category.rb
++++ b/app/models/dinamo/video_category.rb
+@@ -5,6 +5,7 @@
+ # Table name: video_categories
+ #
+ #  id           :bigint           not null, primary key
++#  picture      :string
+ #  translations :jsonb            not null
+ #  created_at   :datetime         not null
+ #  updated_at   :datetime         not null
+@@ -13,5 +14,6 @@ module Dinamo
+   class VideoCategory < ::DinamoRecord
+     translates :name
+     validates :name, presence: true
++    mount_uploader :picture, VideoCategoryPictureUploader
+   end
+ end
+diff --git a/app/serializers/mobile_api/v1/video_category/picture_serializer.rb b/app/serializers/mobile_api/v1/video_category/picture_serializer.rb
+new file mode 100644
+index 00000000..3d349c51
+--- /dev/null
++++ b/app/serializers/mobile_api/v1/video_category/picture_serializer.rb
+@@ -0,0 +1,18 @@
++# frozen_string_literal: true
++
++module MobileApi
++  module V1
++    module VideoCategory
++      class PictureSerializer
++        include Serializable
++
++        extend CarrierWaveSerializer
++        uploader :picture
++
++        def serializable_hash(*)
++          { xm: picture }
++        end
++      end
++    end
++  end
++end
+diff --git a/app/serializers/mobile_api/v1/video_category_serializer.rb b/app/serializers/mobile_api/v1/video_category_serializer.rb
+index 105d569a..49dfd119 100644
+--- a/app/serializers/mobile_api/v1/video_category_serializer.rb
++++ b/app/serializers/mobile_api/v1/video_category_serializer.rb
+@@ -6,6 +6,10 @@ module MobileApi
+       include JSONAPI::Serializer
+ 
+       attributes :id, :name
++      attribute :pictures do |object|
++        serializer = VideoCategory::PictureSerializer.new(object)
++        serializer.serializable_hash
++      end
+     end
+   end
+ end
+diff --git a/app/services/mobile_api/v1/video_category/base_service.rb b/app/services/mobile_api/v1/video_category/base_service.rb
+new file mode 100644
+index 00000000..e3886c0c
+--- /dev/null
++++ b/app/services/mobile_api/v1/video_category/base_service.rb
+@@ -0,0 +1,15 @@
++# frozen_string_literal: true
++
++module MobileApi
++  module V1
++    module VideoCategory
++      class BaseService < ::Tenant::BaseService
++        protected
++
++        def base_scope
++          tenant_class('VideoCategory').i18n
++        end
++      end
++    end
++  end
++end
+diff --git a/app/services/mobile_api/v1/video_category/find.rb b/app/services/mobile_api/v1/video_category/find.rb
+new file mode 100644
+index 00000000..da5345c3
+--- /dev/null
++++ b/app/services/mobile_api/v1/video_category/find.rb
+@@ -0,0 +1,18 @@
++# frozen_string_literal: true
++
++module MobileApi
++  module V1
++    module VideoCategory
++      class Find < BaseService
++        def self.call(tenant, ids)
++          new(tenant).call(ids)
++        end
++
++        def call(ids)
++          scoped = base_scope
++          scoped.find(ids)
++        end
++      end
++    end
++  end
++end
+diff --git a/app/services/mobile_api/v1/video_category/read.rb b/app/services/mobile_api/v1/video_category/read.rb
+new file mode 100644
+index 00000000..34fb273f
+--- /dev/null
++++ b/app/services/mobile_api/v1/video_category/read.rb
+@@ -0,0 +1,32 @@
++# frozen_string_literal: true
++
++module MobileApi
++  module V1
++    module VideoCategory
++      class Read < BaseService
++        def self.call(tenant, **params)
++          new(tenant).call(**params)
++        end
++
++        def call(**params)
++          options = params.with_indifferent_access
++
++          scoped = base_scope
++          scoped = sort(scoped, options)
++          paginate(scoped, options)
++        end
++
++        private
++
++        def sort(scoped, params)
++          service = Utils::JsonApi::Sort.new(:name, :created_at, :updated_at)
++          service.call(scoped, params, default: 'name')
++        end
++
++        def paginate(scoped, params)
++          Utils::JsonApi::Paginate.call(scoped, params)
++        end
++      end
++    end
++  end
++end
+diff --git a/app/uploaders/video_category_picture_uploader.rb b/app/uploaders/video_category_picture_uploader.rb
+new file mode 100644
+index 00000000..923fd804
+--- /dev/null
++++ b/app/uploaders/video_category_picture_uploader.rb
+@@ -0,0 +1,17 @@
++# frozen_string_literal: true
++
++class VideoCategoryPictureUploader < CarrierWave::Uploader::Base
++  include CarrierWave::MiniMagick
++
++  def store_dir
++    "uploads/#{model.class.to_s.underscore}/#{mounted_as}/#{model.id}"
++  end
++
++  version :medium do
++    process resize_to_fit: [390, 375]
++  end
++
++  def extension_allowlist
++    %w[jpg jpeg png]
++  end
++end
+diff --git a/app/validators/video_category_contracts.rb b/app/validators/video_category_contracts.rb
+new file mode 100644
+index 00000000..c5fa8e4a
+--- /dev/null
++++ b/app/validators/video_category_contracts.rb
+@@ -0,0 +1,8 @@
++# frozen_string_literal: true
++
++class VideoCategoryContracts < ApplicationContract
++  params do
++    required(:name).filled(:string)
++    required(:name).value(size?: TITLE_SIZE, format?: STRING_PATTERN)
++  end
++end
+diff --git a/config/routes.rb b/config/routes.rb
+index f3c660cb..4fe59d1d 100644
+--- a/config/routes.rb
++++ b/config/routes.rb
+@@ -16,6 +16,7 @@ Rails.application.routes.draw do
+       resources :custom_stories, only: %i[index show]
+       resources :matches, only: %i[index show]
+       resources :video_posts, only: %i[index show]
++      resources :video_categories, only: %i[index show]
+     end
+   end
+ 
+diff --git a/db/dinamo_migrate/20221117153604_create_video_categories.rb b/db/dinamo_migrate/20221110060212_create_video_categories.rb
+similarity index 91%
+rename from db/dinamo_migrate/20221117153604_create_video_categories.rb
+rename to db/dinamo_migrate/20221110060212_create_video_categories.rb
+index ddfaef2f..fc78a6bc 100644
+--- a/db/dinamo_migrate/20221117153604_create_video_categories.rb
++++ b/db/dinamo_migrate/20221110060212_create_video_categories.rb
+@@ -2,6 +2,7 @@ class CreateVideoCategories < ActiveRecord::Migration[6.1]
+   def up
+     create_table :video_categories do |t|
+       t.jsonb :translations, null: false, default: {}
++      t.string :picture
+       t.timestamps
+     end
+   end
+diff --git a/db/dinamo_schema.rb b/db/dinamo_schema.rb
+index 23f711e6..94eb4d39 100644
+--- a/db/dinamo_schema.rb
++++ b/db/dinamo_schema.rb
+@@ -156,6 +156,7 @@ ActiveRecord::Schema.define(version: 2022_12_02_072110) do
+ 
+   create_table "video_categories", force: :cascade do |t|
+     t.jsonb "translations", default: {}, null: false
++    t.string "picture"
+     t.datetime "created_at", precision: 6, null: false
+     t.datetime "updated_at", precision: 6, null: false
+   end
+diff --git a/db/seeds/dinamo/video_categories.seeds.rb b/db/seeds/dinamo/video_categories.seeds.rb
+index 3ce237e2..3bdcf76c 100644
+--- a/db/seeds/dinamo/video_categories.seeds.rb
++++ b/db/seeds/dinamo/video_categories.seeds.rb
+@@ -1,7 +1,9 @@
+ require 'ffaker'
+ require_relative '../support'
+ 3.times do
+-  category = ::Dinamo::VideoCategory.new
++  category = ::Dinamo::VideoCategory.new(
++    picture: Seeds::Support.avatar_file
++  )
+   Tenant::DefaultSettings.available_locales.each do |locale|
+     Mobility.with_locale(locale) do
+       category.name = FFaker::Lorem.phrase
+diff --git a/db/seeds/dinamo_staging/video_categories.seeds.rb b/db/seeds/dinamo_staging/video_categories.seeds.rb
+index 1bf78719..f8607d3d 100644
+--- a/db/seeds/dinamo_staging/video_categories.seeds.rb
++++ b/db/seeds/dinamo_staging/video_categories.seeds.rb
+@@ -1,12 +1,16 @@
+ require_relative '../support'
+ 
++def open_file(filename)
++  File.open(File.expand_path("video_categories/#{filename}", __dir__))
++end
++
+ items = YAML.load_file(File.expand_path('video_categories/video_categories.yml', __dir__))
+ items.each do |item|
+   options = item['video_category'].with_indifferent_access
+   next if options.blank?
+ 
+   category = ::Dinamo::VideoCategory.new
+-
++  category.picture = open_file(options[:picture]) if options[:picture]
+   Tenant::DefaultSettings.available_locales.each do |locale|
+     Mobility.with_locale(locale) do
+       category.name = options.dig(locale, :name)
+diff --git a/spec/factories/dinamo/video_categories.rb b/spec/factories/dinamo/video_categories.rb
+index b248b564..2dcc1202 100644
+--- a/spec/factories/dinamo/video_categories.rb
++++ b/spec/factories/dinamo/video_categories.rb
+@@ -3,6 +3,7 @@
+ # Table name: video_categories
+ #
+ #  id           :bigint           not null, primary key
++#  picture      :string
+ #  translations :jsonb            not null
+ #  created_at   :datetime         not null
+ #  updated_at   :datetime         not null
+@@ -10,5 +11,10 @@
+ FactoryBot.define do
+   factory :dinamo_video_category, class: 'Dinamo::VideoCategory', aliases: ['Dinamo::VideoCategory'] do
+     name { FFaker::Lorem.phrase }
++    trait :with_picture do
++      after(:build) do |video_category|
++        video_category.picture = File.open(Rails.root.join('spec/fixtures/default-user-avatar-300x300.png'))
++      end
++    end
+   end
+ end
+diff --git a/spec/models/dinamo/video_category_spec.rb b/spec/models/dinamo/video_category_spec.rb
+index c75fd8f2..45edaa06 100644
+--- a/spec/models/dinamo/video_category_spec.rb
++++ b/spec/models/dinamo/video_category_spec.rb
+@@ -3,6 +3,7 @@
+ # Table name: video_categories
+ #
+ #  id           :bigint           not null, primary key
++#  picture      :string
+ #  translations :jsonb            not null
+ #  created_at   :datetime         not null
+ #  updated_at   :datetime         not null
+diff --git a/spec/requests/mobile_api/v1/dinamo/get_video_categories_spec.rb b/spec/requests/mobile_api/v1/dinamo/get_video_categories_spec.rb
+new file mode 100644
+index 00000000..2597c08f
+--- /dev/null
++++ b/spec/requests/mobile_api/v1/dinamo/get_video_categories_spec.rb
+@@ -0,0 +1,131 @@
++require 'spec_helper'
++
++describe 'MobileApi/V1/VideoCategories', type: :request do
++  let(:json_response) { JSON.parse(response.body) }
++
++  describe 'get /index' do
++    context 'with paginate' do
++      before do
++        create_list(:dinamo_video_category, 2)
++      end
++
++      it 'returns correct records count on the pages' do
++        mobile_api_get '/v1/video_categories/', params: { page: { number: 2, size: 1 } }
++        expect(json_response['data']).to be_one
++      end
++
++      it 'returns error on page size great than max size' do
++        mobile_api_get '/v1/video_categories/', params: { page: { size: 1000 } }
++        expect(response).to have_http_status(:bad_request)
++      end
++
++      it 'returns error on page size invalid value' do
++        mobile_api_get '/v1/video_categories/', params: { page: { size: 'q' } }
++        expect(response).to have_http_status(:bad_request)
++      end
++
++      it 'returns error on page number invalid value' do
++        mobile_api_get '/v1/video_categories/', params: { page: { number: 'q' } }
++        expect(response).to have_http_status(:bad_request)
++      end
++    end
++
++    context 'when apply sort' do
++      let(:sorted_categories) { json_response['data'] }
++      let(:current_time) { Time.new(2022, 1, 1, 12, 0, 0, 0) }
++      let!(:name_asc_created_at_desc) { create(:dinamo_video_category, name: '1', created_at: current_time) }
++      let!(:name_desc_created_at_asc) { create(:dinamo_video_category, name: '2', created_at: current_time.yesterday) }
++
++      it 'by published descending returns new categories on first' do
++        mobile_api_get '/v1/video_categories/', params: { sort: '-created_at' }
++
++        expect(sorted_categories.first['id']).to eq(name_asc_created_at_desc.id.to_s)
++      end
++
++      it 'by name descending returns new categories on first' do
++        mobile_api_get '/v1/video_categories/', params: { sort: '-name' }
++
++        expect(sorted_categories.first['id']).to eq(name_desc_created_at_asc.id.to_s)
++      end
++
++      it 'by published ascending returns old categories on first' do
++        mobile_api_get '/v1/video_categories/', params: { sort: 'created_at' }
++
++        expect(sorted_categories.first['id']).to eq(name_desc_created_at_asc.id.to_s)
++      end
++
++      it 'by name ascending returns old categories on first' do
++        mobile_api_get '/v1/video_categories/', params: { sort: 'name' }
++
++        expect(sorted_categories.first['id']).to eq(name_asc_created_at_desc.id.to_s)
++      end
++
++      it 'returns error on not found sortable column' do
++        mobile_api_get '/v1/video_categories/', params: { sort: 'qqqqqqqqq' }
++
++        expect(response).to have_http_status(:bad_request)
++      end
++    end
++  end
++
++  describe 'get /show' do
++    context 'when category' do
++      let(:video_category) { create(:dinamo_video_category) }
++
++      before {
++        mobile_api_get "/v1/video_categories/#{video_category.id}"
++      }
++
++      it 'returns status of the request "success"' do
++        expect(response).to have_http_status(:success)
++      end
++    end
++
++    context 'when category is translate' do
++      let(:attributes) { json_response['data']['attributes'] }
++
++      let(:video_category) {
++        instance = build(:dinamo_video_category)
++
++        Tenant::DefaultSettings.available_locales.each do |locale|
++          Mobility.with_locale(locale) do
++            instance.update(attributes_for(:dinamo_video_category))
++          end
++        end
++
++        instance
++      }
++
++      Tenant::DefaultSettings.available_locales.each do |locale|
++        it %(returns correct "name" attribute for "#{locale}" locale) do
++          mobile_api_get "/v1/video_categories/#{video_category.id}", headers: { 'X-Locale' => locale }
++
++          expect(attributes['name']).to eq(video_category.name(locale: locale))
++        end
++      end
++    end
++
++    context 'when category not found' do
++      before do
++        mobile_api_get '/v1/video_categories/9999'
++      end
++
++      it 'returns error status' do
++        expect(response).to have_http_status(:not_found)
++      end
++    end
++
++    context 'when a category includes pictures' do
++      let(:pictures) { json_response['data']['attributes']['pictures'] }
++      let(:video_category) { create(:dinamo_video_category, :with_picture) }
++
++      before {
++        mobile_api_get "/v1/video_categories/#{video_category.id}"
++      }
++
++      it 'returns correct "pictures" attribute in news post' do
++        expect(pictures).to a_hash_including('xm')
++      end
++    end
++  end
++end
+-- 
+2.39.1.windows.1
+

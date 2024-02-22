@@ -1,0 +1,191 @@
+From baa7eb512bf437e5e65a9a3957954fd500759680 Mon Sep 17 00:00:00 2001
+From: Sergey Khmylev <sergei.khmylev@dcsportsoft.com>
+Date: Thu, 15 Jun 2023 23:48:53 +0300
+Subject: [PATCH] [FEST-838] refactoring sales controller
+
+---
+ app/controllers/admin/sales_controller.rb     |  2 +-
+ app/policies/admin/sale_policy.rb             |  6 +++
+ .../controls/admin/sales/index_service.rb     | 17 ++++++++
+ app/views/admin/sales/index.html.erb          |  2 +-
+ spec/requests/admin/sales_spec.rb             | 25 ++++++++---
+ .../admin/sales/index_service_spec.rb         | 43 +++++++++++++++++++
+ .../shared_examples/unauthorized_action.rb    |  9 ++++
+ 7 files changed, 97 insertions(+), 7 deletions(-)
+ create mode 100644 app/policies/admin/sale_policy.rb
+ create mode 100644 app/services/controls/admin/sales/index_service.rb
+ create mode 100644 spec/services/controls/admin/sales/index_service_spec.rb
+ create mode 100644 spec/support/shared_examples/unauthorized_action.rb
+
+diff --git a/app/controllers/admin/sales_controller.rb b/app/controllers/admin/sales_controller.rb
+index ca83197..4554332 100644
+--- a/app/controllers/admin/sales_controller.rb
++++ b/app/controllers/admin/sales_controller.rb
+@@ -3,7 +3,7 @@
+ module Admin
+   class SalesController < Admin::AppController
+     def index
+-      @sales_by_date = ::Sales::GetDataService.call.value!
++      render_service_result call_action_service(::Controls::Admin::Sales::IndexService)
+     end
+   end
+ end
+diff --git a/app/policies/admin/sale_policy.rb b/app/policies/admin/sale_policy.rb
+new file mode 100644
+index 0000000..5f3d84c
+--- /dev/null
++++ b/app/policies/admin/sale_policy.rb
+@@ -0,0 +1,6 @@
++# frozen_string_literal: true
++
++module Admin
++  class SalePolicy < ::Admin::ApplicationPolicy
++  end
++end
+diff --git a/app/services/controls/admin/sales/index_service.rb b/app/services/controls/admin/sales/index_service.rb
+new file mode 100644
+index 0000000..26de9a4
+--- /dev/null
++++ b/app/services/controls/admin/sales/index_service.rb
+@@ -0,0 +1,17 @@
++# frozen_string_literal: true
++
++module Controls
++  module Admin
++    module Sales
++      class IndexService < ::Controls::Admin::BaseService
++        option :sales_service_class, default: -> { ::Sales::GetDataService }
++
++        def call
++          yield authorize(:sale)
++          data = yield sales_service_class.call
++          Success({ resources: data })
++        end
++      end
++    end
++  end
++end
+diff --git a/app/views/admin/sales/index.html.erb b/app/views/admin/sales/index.html.erb
+index 6e63aee..54fb906 100644
+--- a/app/views/admin/sales/index.html.erb
++++ b/app/views/admin/sales/index.html.erb
+@@ -16,7 +16,7 @@
+       </tr>
+     </thead>
+     <tbody class="table-group-divider">
+-      <% @sales_by_date.each do |date, data| %>
++      <% resources.each do |date, data| %>
+         <%= render partial: 'date', locals: { date: date, rows: data.values } %>
+       <% end %>
+     </tbody>
+diff --git a/spec/requests/admin/sales_spec.rb b/spec/requests/admin/sales_spec.rb
+index c586b5e..1117656 100644
+--- a/spec/requests/admin/sales_spec.rb
++++ b/spec/requests/admin/sales_spec.rb
+@@ -4,7 +4,11 @@ require 'spec_helper'
+ 
+ describe 'Admin Sales', type: :request do
+   let(:role) { :admin }
+-  let!(:manager) { create(:manager, role: role) }
++  let!(:ticket) { create(:ticket, order_item: order.order_items.first) }
++  let(:price) { (order.order_items.first.price / 100).to_s }
++  let(:manager) { create(:manager, role: role) }
++
++  include_context 'when order exists'
+ 
+   before { sign_in manager }
+ 
+@@ -13,11 +17,22 @@ describe 'Admin Sales', type: :request do
+   describe 'GET /admin/sales' do
+     subject(:http_request) { get admin_sales_path }
+ 
+-    it 'renders sales data', :aggregate_failures do
+-      http_request
++    context 'when role is admin' do
++      it 'renders sales data', :aggregate_failures do
++        http_request
++
++        expect(response).to be_ok
++        expect(response.content_type).to eq 'text/html; charset=utf-8'
++        expect(response.body).to include(ticket.created_at.to_date.to_s)
++        expect(response.body).to include(price)
++        expect(response.body).to include(ticket.ticket_type.name)
++      end
++    end
++
++    context 'when role is sales' do
++      let(:role) { :sales }
+ 
+-      expect(response).to be_ok
+-      expect(response.content_type).to eq 'text/html; charset=utf-8'
++      it_behaves_like 'UnauthorizedAction'
+     end
+   end
+ end
+diff --git a/spec/services/controls/admin/sales/index_service_spec.rb b/spec/services/controls/admin/sales/index_service_spec.rb
+new file mode 100644
+index 0000000..a76293f
+--- /dev/null
++++ b/spec/services/controls/admin/sales/index_service_spec.rb
+@@ -0,0 +1,43 @@
++# frozen_string_literal: true
++
++require 'spec_helper'
++
++describe Controls::Admin::Sales::IndexService do
++  subject(:result) { service.call(date_from, date_till, '') }
++
++  let(:service) do
++    Class.new(described_class) do
++      private
++
++      def authorize(...)
++        Success(true)
++      end
++    end
++  end
++  let(:ticket) { create(:ticket, order_item: order.order_items.first) }
++  let(:date_from) { ticket.created_at.to_date }
++  let(:date_till) { ticket.created_at.to_date }
++  let(:price) { order.order_items.first.price / 100 }
++  let(:expected_result) {
++    { resources: {
++      ticket.created_at.to_date => {
++        "#{ticket.ticket_type.id}-#{price}" => {
++          date:        ticket.created_at.to_date,
++          name:        ticket.ticket_type.name,
++          dates:       ticket.ticket_type.decorate.formated_dates,
++          price:       price,
++          sales_count: 1
++        }
++      }
++    } }
++  }
++
++  include_context 'when order exists'
++
++  it { expect(service.call.failure).to be_a(BadRequestError) }
++
++  it do
++    expect(result).to be_success
++    expect(result.value!).to eq(expected_result)
++  end
++end
+diff --git a/spec/support/shared_examples/unauthorized_action.rb b/spec/support/shared_examples/unauthorized_action.rb
+new file mode 100644
+index 0000000..4623ab2
+--- /dev/null
++++ b/spec/support/shared_examples/unauthorized_action.rb
+@@ -0,0 +1,9 @@
++# frozen_string_literal: true
++
++RSpec.shared_examples 'UnauthorizedAction' do
++  it 'the response should redirect to the main page with an unauthorized notice' do
++    http_request
++    follow_redirect!
++    expect(response.body).to match 'Unauthorized: You are not authorized to perform this action'
++  end
++end
+-- 
+2.39.1.windows.1
+

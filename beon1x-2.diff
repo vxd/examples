@@ -1,0 +1,566 @@
+From 0d9b27147477f41f94b9c6c5a69f2d9c2f530ac4 Mon Sep 17 00:00:00 2001
+From: Sergey Khmylev <sergei.khmylev@dcsportsoft.com>
+Date: Thu, 29 Jun 2023 18:50:42 +0300
+Subject: [PATCH] [FEST-757] implemented integration tests of the stripe
+ payment system
+
+---
+ .../checkout.event.completed.json             | 208 ++++++++++++++++++
+ .../stripe_webhooks/checkout.session.json     |  77 +++++++
+ .../ecommpay_spec.rb}                         |   0
+ .../api/v1/payments/callbacks/stripe_spec.rb  | 153 +++++++++++++
+ spec/spec_helper.rb                           |   1 +
+ spec/support/stripe_webhook_helper.rb         |  23 ++
+ .../schemas/stripe_event_callback.yaml        |  31 +++
+ 7 files changed, 493 insertions(+)
+ create mode 100644 spec/fixtures/files/stripe_webhooks/checkout.event.completed.json
+ create mode 100644 spec/fixtures/files/stripe_webhooks/checkout.session.json
+ rename spec/requests/api/v1/payments/{callbacks_spec.rb => callbacks/ecommpay_spec.rb} (100%)
+ create mode 100644 spec/requests/api/v1/payments/callbacks/stripe_spec.rb
+ create mode 100644 spec/support/stripe_webhook_helper.rb
+ create mode 100644 spec/swagger/components/schemas/stripe_event_callback.yaml
+
+diff --git a/spec/fixtures/files/stripe_webhooks/checkout.event.completed.json b/spec/fixtures/files/stripe_webhooks/checkout.event.completed.json
+new file mode 100644
+index 0000000..1c40b0e
+--- /dev/null
++++ b/spec/fixtures/files/stripe_webhooks/checkout.event.completed.json
+@@ -0,0 +1,208 @@
++{
++  "id": "evt_1NO0ulIFGoqRowgbkLwfCz9C",
++  "object": "event",
++  "api_version": "2022-11-15",
++  "created": 1687968499,
++  "data": {
++    "object": {
++      "id": "cs_test_a1NhfKkhrTwC6oAObM3QY46gcykTQouQ50GYX1ea0mxZfhpcHZJTzlxFpo",
++      "object": "checkout.session",
++      "after_expiration": null,
++      "allow_promotion_codes": null,
++      "amount_subtotal": 3000,
++      "amount_total": 3000,
++      "automatic_tax": {
++        "enabled": false,
++        "status": null
++      },
++      "billing_address_collection": null,
++      "cancel_url": "https://httpbin.org/post",
++      "client_reference_id": null,
++      "consent": null,
++      "consent_collection": null,
++      "created": 1687968496,
++      "currency": "usd",
++      "currency_conversion": null,
++      "custom_fields": [],
++      "custom_text": {
++        "shipping_address": null,
++        "submit": null
++      },
++      "customer": null,
++      "customer_creation": "if_required",
++      "customer_details": {
++        "address": {
++          "city": "South San Francisco",
++          "country": "US",
++          "line1": "354 Oyster Point Blvd",
++          "line2": null,
++          "postal_code": "94080",
++          "state": "CA"
++        },
++        "email": "stripe@example.com",
++        "name": "Jenny Rosen",
++        "phone": null,
++        "tax_exempt": "none",
++        "tax_ids": []
++      },
++      "customer_email": null,
++      "expires_at": 1688054896,
++      "invoice": null,
++      "invoice_creation": {
++        "enabled": false,
++        "invoice_data": {
++          "account_tax_ids": null,
++          "custom_fields": null,
++          "description": null,
++          "footer": null,
++          "metadata": {},
++          "rendering_options": null
++        }
++      },
++      "livemode": false,
++      "locale": null,
++      "metadata": {},
++      "mode": "payment",
++      "payment_intent": "pi_3NO0ukIFGoqRowgb1zt4JKB7",
++      "payment_link": null,
++      "payment_method_collection": "always",
++      "payment_method_options": {},
++      "payment_method_types": [
++        "card",
++        "link",
++        "cashapp"
++      ],
++      "payment_status": "paid",
++      "phone_number_collection": {
++        "enabled": false
++      },
++      "recovered_from": null,
++      "setup_intent": null,
++      "shipping_address_collection": null,
++      "shipping_cost": null,
++      "shipping_details": null,
++      "shipping_options": [],
++      "status": "complete",
++      "submit_type": null,
++      "subscription": null,
++      "success_url": "https://httpbin.org/post",
++      "total_details": {
++        "amount_discount": 0,
++        "amount_shipping": 0,
++        "amount_tax": 0
++      },
++      "url": null
++    }
++  },
++  "livemode": false,
++  "pending_webhooks": 2,
++  "request": {
++    "id": null,
++    "idempotency_key": null
++  },
++  "type": "checkout.session.completed",
++  "callback": {
++    "id": "evt_1NO0ulIFGoqRowgbkLwfCz9C",
++    "object": "event",
++    "api_version": "2022-11-15",
++    "created": 1687968499,
++    "data": {
++      "object": {
++        "id": "cs_test_a1NhfKkhrTwC6oAObM3QY46gcykTQouQ50GYX1ea0mxZfhpcHZJTzlxFpo",
++        "object": "checkout.session",
++        "after_expiration": null,
++        "allow_promotion_codes": null,
++        "amount_subtotal": 3000,
++        "amount_total": 3000,
++        "automatic_tax": {
++          "enabled": false,
++          "status": null
++        },
++        "billing_address_collection": null,
++        "cancel_url": "https://httpbin.org/post",
++        "client_reference_id": null,
++        "consent": null,
++        "consent_collection": null,
++        "created": 1687968496,
++        "currency": "usd",
++        "currency_conversion": null,
++        "custom_fields": [],
++        "custom_text": {
++          "shipping_address": null,
++          "submit": null
++        },
++        "customer": null,
++        "customer_creation": "if_required",
++        "customer_details": {
++          "address": {
++            "city": "South San Francisco",
++            "country": "US",
++            "line1": "354 Oyster Point Blvd",
++            "line2": null,
++            "postal_code": "94080",
++            "state": "CA"
++          },
++          "email": "stripe@example.com",
++          "name": "Jenny Rosen",
++          "phone": null,
++          "tax_exempt": "none",
++          "tax_ids": []
++        },
++        "customer_email": null,
++        "expires_at": 1688054896,
++        "invoice": null,
++        "invoice_creation": {
++          "enabled": false,
++          "invoice_data": {
++            "account_tax_ids": null,
++            "custom_fields": null,
++            "description": null,
++            "footer": null,
++            "metadata": {},
++            "rendering_options": null
++          }
++        },
++        "livemode": false,
++        "locale": null,
++        "metadata": {},
++        "mode": "payment",
++        "payment_intent": "pi_3NO0ukIFGoqRowgb1zt4JKB7",
++        "payment_link": null,
++        "payment_method_collection": "always",
++        "payment_method_options": {},
++        "payment_method_types": [
++          "card",
++          "link",
++          "cashapp"
++        ],
++        "payment_status": "paid",
++        "phone_number_collection": {
++          "enabled": false
++        },
++        "recovered_from": null,
++        "setup_intent": null,
++        "shipping_address_collection": null,
++        "shipping_cost": null,
++        "shipping_details": null,
++        "shipping_options": [],
++        "status": "complete",
++        "submit_type": null,
++        "subscription": null,
++        "success_url": "https://httpbin.org/post",
++        "total_details": {
++          "amount_discount": 0,
++          "amount_shipping": 0,
++          "amount_tax": 0
++        },
++        "url": null
++      }
++    },
++    "livemode": false,
++    "pending_webhooks": 2,
++    "request": {
++      "id": null,
++      "idempotency_key": null
++    },
++    "type": "checkout.session.completed"
++  }
++}
+\ No newline at end of file
+diff --git a/spec/fixtures/files/stripe_webhooks/checkout.session.json b/spec/fixtures/files/stripe_webhooks/checkout.session.json
+new file mode 100644
+index 0000000..f621d57
+--- /dev/null
++++ b/spec/fixtures/files/stripe_webhooks/checkout.session.json
+@@ -0,0 +1,77 @@
++{
++  "id": "cs_test_a1xeg2blehf7cRXzQQgcs4Z0yHvz1hcExerB4wL8KNPtVHNxqwmXeDNYAc",
++  "object": "checkout.session",
++  "after_expiration": null,
++  "allow_promotion_codes": null,
++  "amount_subtotal": null,
++  "amount_total": null,
++  "automatic_tax": {
++    "enabled": false,
++    "status": null
++  },
++  "billing_address_collection": null,
++  "cancel_url": "https://example.com/cancel",
++  "client_reference_id": null,
++  "consent": null,
++  "consent_collection": null,
++  "created": 1688024007,
++  "currency": null,
++  "currency_conversion": null,
++  "custom_fields": [],
++  "custom_text": {
++    "shipping_address": null,
++    "submit": null
++  },
++  "customer": null,
++  "customer_creation": null,
++  "customer_details": {
++    "address": null,
++    "email": "example@example.com",
++    "name": null,
++    "phone": null,
++    "tax_exempt": "none",
++    "tax_ids": null
++  },
++  "customer_email": null,
++  "expires_at": 1688024007,
++  "invoice": null,
++  "invoice_creation": null,
++  "livemode": false,
++  "locale": null,
++  "metadata": {},
++  "mode": "payment",
++  "payment_intent": {
++    "payment_method": {
++      "card": {
++        "country": "RU"
++      }
++    }
++  },
++  "customer_details": {
++    "address": {
++      "country": "RU"
++    }
++  },
++  "payment_link": null,
++  "payment_method_collection": null,
++  "payment_method_options": {},
++  "payment_method_types": [
++    "card"
++  ],
++  "payment_status": "paid",
++  "phone_number_collection": {
++    "enabled": false
++  },
++  "recovered_from": null,
++  "setup_intent": null,
++  "shipping_address_collection": null,
++  "shipping_cost": null,
++  "shipping_details": null,
++  "shipping_options": [],
++  "status": "open",
++  "submit_type": null,
++  "subscription": null,
++  "success_url": "https://example.com/success",
++  "total_details": null,
++  "url": null
++}
+\ No newline at end of file
+diff --git a/spec/requests/api/v1/payments/callbacks_spec.rb b/spec/requests/api/v1/payments/callbacks/ecommpay_spec.rb
+similarity index 100%
+rename from spec/requests/api/v1/payments/callbacks_spec.rb
+rename to spec/requests/api/v1/payments/callbacks/ecommpay_spec.rb
+diff --git a/spec/requests/api/v1/payments/callbacks/stripe_spec.rb b/spec/requests/api/v1/payments/callbacks/stripe_spec.rb
+new file mode 100644
+index 0000000..4447a84
+--- /dev/null
++++ b/spec/requests/api/v1/payments/callbacks/stripe_spec.rb
+@@ -0,0 +1,153 @@
++# frozen_string_literal: true
++
++require 'swagger_helper'
++
++describe 'API Payment Callbacks', type: :request do
++  let(:whsecret) { Rails.configuration.environment.stripe[:endpoint_secret] }
++  let(:event) { raw_request_data }
++
++  before do
++    stub_request(:get,
++                 "https://api.stripe.com/v1/checkout/sessions/#{event.dig(*%w[data object id])}"\
++                 '?expand%5B%5D=payment_intent.payment_method')
++      .to_return(status: 200, body: session_data.to_json, headers: {})
++  end
++
++  path '/api/v1/payments/callbacks/stripe', document: false do
++    post 'Payment callback from Stripe' do
++      description 'Accepts callback from the payment system.'
++      tags 'payment'
++      json_api
++      parameter name: :event, in: :body, schema: { '$ref' => '#/components/schemas/stripe_event_callback' }
++      parameter name: :HTTP_STRIPE_SIGNATURE, in: :header
++
++      let(:session_filename) { 'stripe_webhooks/checkout.session.json' }
++      let(:raw_session_data) {
++        JSON.parse(file_fixture(session_filename).read)
++          .merge({ 'client_reference_id'=>payment_stripe.hashed_id })
++      }
++      let(:session_data) { raw_session_data }
++
++      let(:raw_request_data) { JSON.parse file_fixture(request_filename).read }
++      let(:request_filename) { 'stripe_webhooks/checkout.event.completed.json' }
++
++      let(:payment_stripe) { build(:payment, id: 1000, created_at: '2022-07-07 12:00:00 +0300', service: 'stripe') }
++      # rubocop:disable RSpec/VariableName
++      let(:HTTP_STRIPE_SIGNATURE) { stripe_webhook_header({ secret: whsecret, payload: event.to_json }) }
++      # rubocop:enable RSpec/VariableName
++
++      response_200 do
++        schema type: :string, format: :binary
++
++        subject(:api_request) { |example| submit_request(example.metadata) }
++
++        include_context 'when order exists' do
++          let(:payment) { payment_stripe }
++        end
++
++        context 'when recieve success callback' do
++          it 'handles a callback' do |example|
++            expect { api_request }.to have_enqueued_job(CreateTicketsJob).once.with(order.reload)
++                                        .and have_enqueued_job(SendPurchaseEventJob).once.with(order.reload)
++
++            order.reload
++
++            expect(order.payment_state).to eq('successed')
++            expect(order.success_payment).to eq(payment)
++            expect(order.success_payment.ip_country).to eq('RU')
++            expect(order.success_payment.card_country).to eq('RU')
++
++            assert_response_matches_metadata(example.metadata)
++          end
++        end
++
++        context 'when recieve success callback and order has coupon' do
++          let(:coupon) { create(:coupon) }
++
++          before do
++            order.coupon = coupon
++            order.save
++          end
++
++          run_test! do
++            expect(coupon.reload.current_uses).to eq(1)
++          end
++        end
++
++        context 'when receive unpaid callback' do
++          let(:session_data) {
++            data = raw_session_data.clone
++            data['payment_status'] = 'unpaid'
++            data
++          }
++
++          it 'handles a callback' do |example|
++            expect { api_request }.not_to have_enqueued_job(CreateTicketsJob)
++
++            expect(order.reload.payment_state).to eq('canceled')
++
++            assert_response_matches_metadata(example.metadata)
++          end
++        end
++
++        context 'when order has successed payment' do
++          let!(:order) {
++            create(:order, :with_items,
++                   user:            user,
++                   payments:        [payment],
++                   payment_state:   'successed',
++                   success_payment: payment,
++                   id:              1000,
++                   created_at:      '2022-07-07 12:00:00 +0300')
++          }
++
++          context 'when receive unpaid callback' do
++            let(:session_data) {
++              data = raw_session_data.clone
++              data['payment_status'] = 'unpaid'
++              data
++            }
++
++            it 'handles a callback' do |example|
++              expect { api_request }.not_to have_enqueued_job(CreateTicketsJob)
++
++              expect(order.reload.payment_state).to eq('successed')
++
++              assert_response_matches_metadata(example.metadata)
++            end
++          end
++        end
++      end
++
++      response_400 do
++        context 'when payment exists' do
++          include_context 'when order exists' do
++            let(:payment) { payment_stripe }
++          end
++
++          context 'with invalid client_reference_id' do
++            let(:session_data) {
++              data = raw_session_data.clone
++              data['client_reference_id'] = 'abcd'
++              data
++            }
++
++            run_test!
++          end
++
++          context 'when receive data with invalid signature' do
++            let(:whsecret) { 'secret' }
++
++            run_test!
++          end
++        end
++
++        context 'when payment not exists' do
++          context 'when receive success callback' do
++            run_test!
++          end
++        end
++      end
++    end
++  end
++end
+diff --git a/spec/spec_helper.rb b/spec/spec_helper.rb
+index 032090a..41bc47d 100644
+--- a/spec/spec_helper.rb
++++ b/spec/spec_helper.rb
+@@ -55,6 +55,7 @@ RSpec.configure do |config| # rubocop:disable Metrics/BlockLength
+   config.include OrderFormConfigsHelper
+   config.include ActiveStorageValidations::Matchers
+   config.include RSpec::JsonExpectations::Matchers
++  config.include StripeWebhookHelper
+ 
+   config.fixture_path = "#{::Rails.root}/spec/fixtures"
+   config.use_transactional_fixtures = true
+diff --git a/spec/support/stripe_webhook_helper.rb b/spec/support/stripe_webhook_helper.rb
+new file mode 100644
+index 0000000..bb4d498
+--- /dev/null
++++ b/spec/support/stripe_webhook_helper.rb
+@@ -0,0 +1,23 @@
++# frozen_string_literal: true
++
++module StripeWebhookHelper
++  SECRET = ''
++  PAYLOAD = ''
++
++  def stripe_webhook_header(opts={})
++    opts[:timestamp] ||= Time.zone.now
++    opts[:payload] ||= PAYLOAD
++    opts[:secret] ||= SECRET
++    opts[:scheme] ||= ::Stripe::Webhook::Signature::EXPECTED_SCHEME
++    opts[:signature] ||= ::Stripe::Webhook::Signature.compute_signature(
++      opts[:timestamp],
++      opts[:payload],
++      opts[:secret]
++    )
++    ::Stripe::Webhook::Signature.generate_header(
++      opts[:timestamp],
++      opts[:signature],
++      scheme: opts[:scheme]
++    )
++  end
++end
+diff --git a/spec/swagger/components/schemas/stripe_event_callback.yaml b/spec/swagger/components/schemas/stripe_event_callback.yaml
+new file mode 100644
+index 0000000..e8e5517
+--- /dev/null
++++ b/spec/swagger/components/schemas/stripe_event_callback.yaml
+@@ -0,0 +1,31 @@
++event:
++  required:
++    - "id"
++    - "object"
++    - "api_version"
++    - "created"
++    - "data"
++    - "type"
++  properties:
++    id:
++      type: "string"
++    object:
++      type: "string"
++    api_version:
++      type: "string"
++    created:
++      type: "number"
++    data:
++      required:
++        - "object"
++      properties:
++        object:
++          required:
++            - "id"
++          properties:
++            id:
++              type: "string"
++          type: "object"
++      type: "object"
++    type:
++      type: "string"
+\ No newline at end of file
+-- 
+2.39.1.windows.1
+

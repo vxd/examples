@@ -1,0 +1,534 @@
+From 91560f4b329eb3f9fc487fc6c612f74b3c8d7894 Mon Sep 17 00:00:00 2001
+From: Sergei Khmylev <sergei.khmylev@insystemplus.ru>
+Date: Tue, 24 Jan 2023 09:04:51 +0000
+Subject: [PATCH] [MATCH-1203] implementation of the api manager for the store
+
+---
+ .../manager_api/v1/store_items_controller.rb  | 35 ++++++++++
+ app/mutators/store_item_mutator.rb            | 50 +++++++++++++++
+ .../v1/store_item/picture_serializer.rb       | 21 ++++++
+ .../v1/store_item/translation_serializer.rb   | 22 +++++++
+ .../manager_api/v1/store_item_serializer.rb   |  9 ++-
+ app/validators/store_item_contracts.rb        |  3 +-
+ config/locales/dry_validation/errors.yml      |  4 +-
+ .../manager_api/v1/create_store_item.json     | 22 +++++++
+ .../manager_api/v1/update_store_item.json     | 24 +++++++
+ .../store_items/delete_store_items_spec.rb    | 18 ++++++
+ .../store_items/patch_store_items_spec.rb     | 52 +++++++++++++++
+ .../store_items/post_store_items_spec.rb      | 64 +++++++++++++++++++
+ .../dinamo/store_items/create_params.rb       | 29 +++++++++
+ .../dinamo/store_items/link_category_hash.rb  | 12 ++++
+ .../dinamo/store_items/update_params.rb       | 13 ++++
+ 15 files changed, 373 insertions(+), 5 deletions(-)
+ create mode 100644 app/mutators/store_item_mutator.rb
+ create mode 100644 app/serializers/manager_api/v1/store_item/picture_serializer.rb
+ create mode 100644 app/serializers/manager_api/v1/store_item/translation_serializer.rb
+ create mode 100644 spec/fixtures/files/manager_api/v1/create_store_item.json
+ create mode 100644 spec/fixtures/files/manager_api/v1/update_store_item.json
+ create mode 100644 spec/requests/manager_api/v1/dinamo/store_items/delete_store_items_spec.rb
+ create mode 100644 spec/requests/manager_api/v1/dinamo/store_items/patch_store_items_spec.rb
+ create mode 100644 spec/requests/manager_api/v1/dinamo/store_items/post_store_items_spec.rb
+ create mode 100644 spec/support/contexts/manager_api/dinamo/store_items/create_params.rb
+ create mode 100644 spec/support/contexts/manager_api/dinamo/store_items/link_category_hash.rb
+ create mode 100644 spec/support/contexts/manager_api/dinamo/store_items/update_params.rb
+
+diff --git a/app/controllers/manager_api/v1/store_items_controller.rb b/app/controllers/manager_api/v1/store_items_controller.rb
+index 27a959a4..bf85459a 100644
+--- a/app/controllers/manager_api/v1/store_items_controller.rb
++++ b/app/controllers/manager_api/v1/store_items_controller.rb
+@@ -4,6 +4,7 @@ module ManagerApi
+   module V1
+     class StoreItemsController < BaseController
+       before_action :authorize!
++      before_action :validate, only: %i[create update]
+ 
+       def index
+         @items = Tenant::BuildClass.call(tenant, 'StoreItem').all
+@@ -14,6 +15,40 @@ module ManagerApi
+         @item = Tenant::BuildClass.call(tenant, 'StoreItem').find(params[:id])
+         render json: ManagerApi::V1::StoreItemSerializer.new(@item), status: :ok
+       end
++
++      def create
++        @item = StoreItemMutator.create!(tenant, store_item_params)
++        render json: ManagerApi::V1::StoreItemSerializer.new(@item, serialization_options), status: :created
++      end
++
++      def update
++        @item = StoreItemMutator.update!(tenant, params[:id], store_item_params)
++        render json: ManagerApi::V1::StoreItemSerializer.new(@item, serialization_options), status: :created
++      end
++
++      def destroy
++        StoreItemMutator.delete!(tenant, params[:id])
++        render json: {}, status: :no_content
++      end
++
++      private
++
++      def validate
++        ::StoreItemContracts.call(store_item_params)
++      end
++
++      def store_item_params
++        params.require(:store_item).permit(:title, :link_url, :price, :price_after_discount,
++                                           picture:       %i[filename data],
++                                           relationships: [categories: []],
++                                           translations:  {})
++      end
++
++      def serialization_options
++        {
++          include: %i[categories]
++        }
++      end
+     end
+   end
+ end
+diff --git a/app/mutators/store_item_mutator.rb b/app/mutators/store_item_mutator.rb
+new file mode 100644
+index 00000000..5320931f
+--- /dev/null
++++ b/app/mutators/store_item_mutator.rb
+@@ -0,0 +1,50 @@
++# frozen_string_literal: true
++
++class StoreItemMutator < BaseMutator
++  def create!(attributes)
++    ActiveRecord::Base.transaction do
++      
++      links_categories = attributes.delete('relationships')
++      picture = attributes.delete('picture')
++      object = base_class.create(attributes)
++      object = load_picture(object, picture, 'picture')
++      object = load_links_categories(object, links_categories)
++      object.save!
++
++      object
++    end
++  end
++
++  def update!(id, attributes)
++    ActiveRecord::Base.transaction do
++      links_categories = attributes.delete('relationships')
++      picture = attributes.delete('picture')
++      object = base_class.find(id)
++      object = load_picture(object, picture, 'picture')
++      object = load_links_categories(object, links_categories)
++      object.update!(attributes)
++      object
++    end
++  end
++
++  protected
++
++  def base_class
++    tenant_class('StoreItem')
++  end
++
++  def load_picture(resource, file, image_key)
++    return if file.blank?
++
++    file_io = ::Utils::Base64StringIo.new(file[:filename], Base64.decode64(file[:data]))
++    resource.public_send("#{image_key}=", file_io)
++    resource
++  end
++
++  def load_links_categories(resource, links_categories)
++    links_categories.each_key do |key|
++      resource.public_send("#{key}_ids=", links_categories[key])
++    end
++    resource
++  end
++end
+diff --git a/app/serializers/manager_api/v1/store_item/picture_serializer.rb b/app/serializers/manager_api/v1/store_item/picture_serializer.rb
+new file mode 100644
+index 00000000..b11553f0
+--- /dev/null
++++ b/app/serializers/manager_api/v1/store_item/picture_serializer.rb
+@@ -0,0 +1,21 @@
++# frozen_string_literal: true
++
++module ManagerApi
++  module V1
++    module StoreItem
++      class PictureSerializer
++        include Serializable
++        delegate :picture, to: :object
++
++        def picture_serializer
++          serializer = UploaderSerializer.new(picture)
++          serializer.serializable_hash
++        end
++
++        def serializable_hash(*)
++          picture_serializer
++        end
++      end
++    end
++  end
++end
+diff --git a/app/serializers/manager_api/v1/store_item/translation_serializer.rb b/app/serializers/manager_api/v1/store_item/translation_serializer.rb
+new file mode 100644
+index 00000000..6e07b4dd
+--- /dev/null
++++ b/app/serializers/manager_api/v1/store_item/translation_serializer.rb
+@@ -0,0 +1,22 @@
++# frozen_string_literal: true
++
++module ManagerApi
++  module V1
++    module StoreItem
++      class TranslationSerializer
++        include Serializable
++        include Tenant::Tenantable
++
++        def serializable_hash(*)
++          res = {}
++          Tenant::BuildClass.call(tenant, 'Config').available_locales.map do |locale, _|
++            Mobility.with_locale(locale) do
++              res[locale] = { title: object.title }
++            end
++          end
++          res
++        end
++      end
++    end
++  end
++end
+diff --git a/app/serializers/manager_api/v1/store_item_serializer.rb b/app/serializers/manager_api/v1/store_item_serializer.rb
+index 385c7277..d4825543 100644
+--- a/app/serializers/manager_api/v1/store_item_serializer.rb
++++ b/app/serializers/manager_api/v1/store_item_serializer.rb
+@@ -5,10 +5,15 @@ module ManagerApi
+     class StoreItemSerializer
+       include JSONAPI::Serializer
+ 
+-      attributes :id, :title, :price, :link_url, :price_after_discount, :title
++      attributes :id, :price, :link_url, :price_after_discount
++
++      attribute :translations do |object|
++        serializer = StoreItem::TranslationSerializer.new(object)
++        serializer.serializable_hash
++      end
+ 
+       attribute :picture do |object|
+-        serializer = UploaderSerializer.new(object.picture)
++        serializer = StoreItem::PictureSerializer.new(object)
+         serializer.serializable_hash
+       end
+ 
+diff --git a/app/validators/store_item_contracts.rb b/app/validators/store_item_contracts.rb
+index 174f996a..8778da1d 100644
+--- a/app/validators/store_item_contracts.rb
++++ b/app/validators/store_item_contracts.rb
+@@ -21,7 +21,8 @@ class StoreItemContracts < ApplicationContract
+ 
+   rule(:translations) do
+     value.each do |_, value|
+-      key.failure(:invalid_text_size) if TITLE_SIZE.exclude?(value[:name].size)
++      key.failure(:invalid_text_size) if value.key?(:title) && TITLE_SIZE.exclude?(value[:title].size)
++      key.failure(:invalid_text_format) if value.key?(:title) && !STRING_PATTERN.match?(value[:title])
+     end
+   end
+ end
+diff --git a/config/locales/dry_validation/errors.yml b/config/locales/dry_validation/errors.yml
+index f1a4fc77..f422cc03 100644
+--- a/config/locales/dry_validation/errors.yml
++++ b/config/locales/dry_validation/errors.yml
+@@ -14,5 +14,5 @@ en:
+         price_after_discount:
+           invalid_discount_price: 'The price is incorrect. The discounted price must be less than the price'
+         translations:
+-          invalid_text_format: 'Invalid text format'
+-          invalid_text_size: 'Text size must be in range'
+\ No newline at end of file
++          invalid_text_size: 'Text size must be in range'
++          invalid_text_format: 'Invalid text format'
+\ No newline at end of file
+diff --git a/spec/fixtures/files/manager_api/v1/create_store_item.json b/spec/fixtures/files/manager_api/v1/create_store_item.json
+new file mode 100644
+index 00000000..a967c08d
+--- /dev/null
++++ b/spec/fixtures/files/manager_api/v1/create_store_item.json
+@@ -0,0 +1,22 @@
++{
++  "store_item": {
++    "relationships": {
++      "categories": []
++    },
++    "picture": {
++        "filename": "base_image.png",
++        "data": ""
++    },
++    "translations": {
++      "en": {
++        "title": "T-Shirt 1"
++      },
++      "ru": {
++        "title": "Футболка 1"
++      }
++    },
++    "price": 1000,
++    "price_after_discount": 900,
++    "link_url": "https://shop.fcdm.ru/product/futbolka_bumaga_originalnaya_sinyaya_puma_22_23_vzr/"
++  }
++}
+diff --git a/spec/fixtures/files/manager_api/v1/update_store_item.json b/spec/fixtures/files/manager_api/v1/update_store_item.json
+new file mode 100644
+index 00000000..7b5ab0b6
+--- /dev/null
++++ b/spec/fixtures/files/manager_api/v1/update_store_item.json
+@@ -0,0 +1,24 @@
++{
++  "store_item": {
++    "relationships": {
++      "categories": []
++    },
++    "picture": {
++        "filename": "new_base_image.png",
++        "data": ""
++
++    },
++    "translations": {
++      "en": {
++        "title": "T-Shirt 2"
++      },
++      "ru": {
++        "title": "Футболка 2"
++      }
++    },
++    "uid": "tshirt-2",
++    "price": 1500,
++    "price_after_discount": 1000,
++    "link_url": "https://shop.fcdm.ru/product/futbolka_zhenskaya_turne_1945_belyy/"
++  }
++}
+\ No newline at end of file
+diff --git a/spec/requests/manager_api/v1/dinamo/store_items/delete_store_items_spec.rb b/spec/requests/manager_api/v1/dinamo/store_items/delete_store_items_spec.rb
+new file mode 100644
+index 00000000..531e3b11
+--- /dev/null
++++ b/spec/requests/manager_api/v1/dinamo/store_items/delete_store_items_spec.rb
+@@ -0,0 +1,18 @@
++require 'spec_helper'
++
++describe 'delete dinamo store items', type: :request do
++  include_context 'with authorized dinamo headers'
++
++  let(:store_item) { create(:dinamo_store_item) }
++
++  context 'if DELETE delete' do
++    before do
++      delete manager_api_v1_store_item_path(store_item.id), headers: headers
++    end
++
++    it 'checks success delete' do
++      expect(response).to have_http_status(:no_content)
++      expect(Dinamo::StoreItem.where(id: store_item.id)).to be_empty
++    end
++  end
++end
+diff --git a/spec/requests/manager_api/v1/dinamo/store_items/patch_store_items_spec.rb b/spec/requests/manager_api/v1/dinamo/store_items/patch_store_items_spec.rb
+new file mode 100644
+index 00000000..e3edeeba
+--- /dev/null
++++ b/spec/requests/manager_api/v1/dinamo/store_items/patch_store_items_spec.rb
+@@ -0,0 +1,52 @@
++require 'spec_helper'
++
++describe 'patch dinamo store items', type: :request do
++  include_context 'with authorized dinamo headers'
++  include_context 'with dinamo links and category hash for store item'
++  include_context 'with update dinamo store item params'
++
++  let!(:store_item) { create(:dinamo_store_item, :with_pictures, :with_uid, :with_category, :with_discount) }
++
++  context 'if PATCH update' do
++    before do
++      patch manager_api_v1_store_item_path(store_item.id), as: :json, params: params, headers: headers
++    end
++
++    it 'checks success update' do
++      expect(response.content_type).to eq('application/json; charset=utf-8')
++      expect(response).to have_http_status(:created)
++    end
++
++    it 'checks success links update' do
++      category_links = params.dig('store_item', 'relationships')
++      item = Dinamo::StoreItem.find(store_item.id)
++      expect(item).to have_same_dinamo_relationships(category_links)
++    end
++
++    it 'checks success pictres update' do
++      item = Dinamo::StoreItem.find(store_item.id)
++      file = item.picture
++      expect(file.identifier).to eq(params['store_item']['picture']['filename'])
++    end
++
++    it 'checks success store item title update' do
++      item = Dinamo::StoreItem.find(store_item.id)
++      expect(item.translations).to eq(params['store_item']['translations'])
++    end
++
++    it 'checks success store item price update' do
++      item = Dinamo::StoreItem.find(store_item.id)
++      expect(item.price).to eq(params['store_item']['price'])
++    end
++
++    it 'checks success store price after discount update' do
++      item = Dinamo::StoreItem.find(store_item.id)
++      expect(item.price_after_discount).to eq(params['store_item']['price_after_discount'])
++    end
++
++    it 'checks success store url update' do
++      item = Dinamo::StoreItem.find(store_item.id)
++      expect(item.link_url).to eq(params['store_item']['link_url'])
++    end
++  end
++end
+diff --git a/spec/requests/manager_api/v1/dinamo/store_items/post_store_items_spec.rb b/spec/requests/manager_api/v1/dinamo/store_items/post_store_items_spec.rb
+new file mode 100644
+index 00000000..fbcad9a2
+--- /dev/null
++++ b/spec/requests/manager_api/v1/dinamo/store_items/post_store_items_spec.rb
+@@ -0,0 +1,64 @@
++require 'spec_helper'
++
++describe 'post dinamo news posts', type: :request do
++  include_context 'with authorized dinamo headers'
++  include_context 'with dinamo links and category hash for store item'
++  include_context 'with create dinamo store item params'
++
++  context 'if POST create' do
++    let(:request) { post manager_api_v1_store_items_path, as: :json, params: params, headers: headers }
++    let(:json_data) { JSON.parse(response.body)['data'] }
++
++    it 'checks success create' do
++      request
++      expect(response.content_type).to eq('application/json; charset=utf-8')
++      expect(response).to have_http_status(:created)
++    end
++
++    it 'checks success record change' do
++      expect { request }.to change(Dinamo::StoreItem, :count).by(1)
++    end
++
++    it 'checks success category and links create' do
++      request
++      category_links = params.dig('store_item', 'relationships')
++      item = Dinamo::StoreItem.find(json_data['id'])
++      expect(item).to have_same_dinamo_relationships(category_links)
++    end
++
++    it 'checks success picture create' do
++      request
++      file = Dinamo::StoreItem.find(json_data['id']).picture
++      expect(file.identifier).to eq(params['store_item']['picture']['filename'])
++    end
++  end
++
++  context 'if POST create with invalid data' do
++    before do
++      post manager_api_v1_store_items_path, as: :json, params: falure_params, headers: headers
++    end
++
++    let(:json_data) { JSON.parse(response.body)['errors'] }
++
++    it 'checks errors with invalid picture size params' do
++      errors_data = json_data.uniq.select { |i| i['attribute'] == 'picture, data' }
++      expect(errors_data.size).to eq(1)
++      expect(errors_data.first['title']).to eq('Invalid param')
++      expect(errors_data.first['details']).to eq('length must be within 1 - 1000000')
++    end
++
++    it 'checks errors with invalid title format params' do
++      errors_data = json_data.uniq.select { |i| i['attribute'] == 'translations' }
++      expect(errors_data.size).to eq(2)
++      expect(errors_data.last['title']).to eq('Invalid param')
++      expect(errors_data.last['details']).to eq('Invalid text format')
++    end
++
++    it 'checks errors with invalid title size params' do
++      errors_data = json_data.uniq.select { |i| i['attribute'] == 'translations' }
++      expect(errors_data.first['title']).to eq('Invalid param')
++      expect(errors_data.first['details']).to eq('Text size must be in range')
++    end
++    
++  end
++end
+diff --git a/spec/support/contexts/manager_api/dinamo/store_items/create_params.rb b/spec/support/contexts/manager_api/dinamo/store_items/create_params.rb
+new file mode 100644
+index 00000000..e8ca6c8a
+--- /dev/null
++++ b/spec/support/contexts/manager_api/dinamo/store_items/create_params.rb
+@@ -0,0 +1,29 @@
++shared_context 'with create dinamo store item params' do
++  let(:params) do
++    params = JSON.parse(file_fixture('manager_api/v1/create_store_item.json').read)
++
++    data = File.open(Rails.root.join('spec/fixtures/default-user-avatar-300x300.png'), 'rb')
++    params['store_item']['picture']['data'] = Base64.encode64(data.read)
++
++    link_category_hash.each_key do |i|
++      params['store_item']['relationships'][i] << link_category_hash[i]
++    end
++
++    params
++  end
++
++  let(:falure_params) do
++    params = JSON.parse(file_fixture('manager_api/v1/create_store_item.json').read)
++
++    params['store_item']['picture']['data'] = SecureRandom.hex(1_000_000)
++
++    link_category_hash.each_key do |i|
++      params['store_item']['relationships'][i] << link_category_hash[i]
++    end
++    params['store_item']['translations'].each_key do |key|
++      text = SecureRandom.hex(257)
++      params['store_item']['translations'][key]['title'] = "#{text}ç√∫ƒ∂©µ"
++    end
++    params
++  end
++end
+diff --git a/spec/support/contexts/manager_api/dinamo/store_items/link_category_hash.rb b/spec/support/contexts/manager_api/dinamo/store_items/link_category_hash.rb
+new file mode 100644
+index 00000000..0fcc7c99
+--- /dev/null
++++ b/spec/support/contexts/manager_api/dinamo/store_items/link_category_hash.rb
+@@ -0,0 +1,12 @@
++shared_context 'with dinamo links and category hash for store item' do
++  let(:link_category_hash) do
++    %w[category].each_with_object({}) do |item, memo|
++      if item == 'category'
++        memo[item.pluralize] = create("dinamo_store_#{item}".to_sym).id
++        next
++      end
++
++      memo[item.pluralize] = create("dinamo_#{item}".to_sym).id
++    end
++  end
++end
+diff --git a/spec/support/contexts/manager_api/dinamo/store_items/update_params.rb b/spec/support/contexts/manager_api/dinamo/store_items/update_params.rb
+new file mode 100644
+index 00000000..7124583c
+--- /dev/null
++++ b/spec/support/contexts/manager_api/dinamo/store_items/update_params.rb
+@@ -0,0 +1,13 @@
++shared_context 'with update dinamo store item params' do
++  let(:params) do
++    params = JSON.parse(file_fixture('manager_api/v1/update_store_item.json').read)
++
++    data = File.open(Rails.root.join('spec/fixtures/test.png'), 'rb')
++    params['store_item']['picture']['data'] = Base64.encode64(data.read)
++
++    link_category_hash.each_key do |i|
++      params['store_item']['relationships'][i] << link_category_hash[i]
++    end
++    params
++  end
++end
+-- 
+2.39.1.windows.1
+
